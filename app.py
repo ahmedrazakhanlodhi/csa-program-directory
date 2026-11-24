@@ -60,8 +60,71 @@ PROGRAMS = DATA["programs"]
 FIELDS = DATA["fields"]
 CATEGORIES = DATA["categories"]
 
+# Data currency is read from the workbook's own "compiled as of" line, so an
+# annual refresh needs no code change. Falls back to a constant if absent.
+DATA_AS_OF = DATA.get("source_date") or "the latest program submissions"
+
 URL_RE = re.compile(r"(https?://[^\s]+)")
+WWW_RE = re.compile(r"\b(www\.[^\s]+\.[^\s]+)")
 EMAIL_RE = re.compile(r"([\w.\-+]+@[\w.\-]+\.\w+)")
+# Conservative bare-domain match (e.g. "aboutchet.com", "pa529.com/keystone"):
+# a host on a common TLD, optionally with a path. Not preceded by @ (email).
+BARE_RE = re.compile(
+    r"(?<![@\w])((?:[a-z0-9][a-z0-9\-]*\.)+(?:com|org|gov|edu|net)(?:/[^\s]*)?)",
+    flags=re.IGNORECASE,
+)
+
+
+def first_url(v):
+    """Pull the first real URL out of a value that may mix prose and a link."""
+    if is_empty(v):
+        return None
+    text = str(v)
+    m = URL_RE.search(text)
+    if m:
+        return m.group(1).rstrip(".,);")
+    m = WWW_RE.search(text)
+    if m:
+        return "https://" + m.group(1).rstrip(".,);")
+    m = BARE_RE.search(text)
+    if m:
+        return "https://" + m.group(1).rstrip(".,);")
+    return None
+
+
+def launch_display(p) -> str:
+    """
+    A compact launch year for the card chip.
+
+    The clean data sometimes gives a two-line value (e.g. a pilot year and a
+    statewide year). Prefer the statewide year, else the latest 4-digit year.
+    The full value still appears in the program profile.
+    """
+    raw = p.get("Launch Year")
+    if is_empty(raw):
+        return ""
+    s = str(raw)
+    years = re.findall(r"(19|20)\d{2}", s)
+    years = [m.group(0) if hasattr(m, "group") else m for m in re.finditer(r"(?:19|20)\d{2}", s)]
+    if "statewide" in s.lower():
+        m = re.search(r"statewide[^0-9]*((?:19|20)\d{2})", s, flags=re.IGNORECASE)
+        if m:
+            return m.group(1)
+    if years:
+        return max(years)
+    return s.splitlines()[0].strip()
+
+
+def has_research(p) -> bool:
+    """True when the program reports a research study or evaluation."""
+    rc = p.get("Research Conducted")
+    if is_empty(rc):
+        return False
+    s = str(rc).strip().lower()
+    if s in {"no", "none", "not yet", "pending"}:
+        return False
+    # Substantive: a link or a real description, not a bare "no".
+    return bool(first_url(rc)) or len(s) > 12
 
 
 def H(s: str) -> str:
@@ -92,24 +155,58 @@ def fmt_money(v) -> str:
         return str(v)
 
 
+def _short_url(u: str) -> str:
+    short = u.replace("https://", "").replace("http://", "")
+    return short[:54] + "…" if len(short) > 55 else short
+
+
+# Fields whose numeric values should render as currency in the profile.
+MONEY_FIELDS = {
+    "Initial Program Deposit",
+    "CSA Assets",
+    "Amount of Linked 529 Assets",
+}
+
+
 def fmt_value(field: str, v):
-    """Render a value as display HTML, linkifying URLs and emails."""
+    """
+    Render a value as display HTML, turning any embedded URLs into links and
+    any embedded emails into mailto links. Works whether the value is a bare
+    URL, a URL mixed into prose ("STATUTE\nhttps://…"), or plain text.
+    """
     if is_empty(v):
         return '<span class="empty">Not provided</span>'
+    # Currency fields: show a bare number as $N, but leave explanatory text alone.
+    if field in MONEY_FIELDS and isinstance(v, (int, float)):
+        return fmt_money(v)
     text = str(v)
-    if "Link to" in field or text.strip().lower().startswith(("http://", "https://", "www.")):
-        urls = URL_RE.findall(text)
-        if not urls and text.strip().lower().startswith("www."):
-            urls = [text.strip()]
-        if urls:
+
+    urls = URL_RE.findall(text)
+    if not urls:
+        m = WWW_RE.search(text)
+        if m:
+            urls = [m.group(1)]
+
+    if urls:
+        # If the value is essentially just the link(s), show clean link chips.
+        stripped = text
+        for u in urls:
+            stripped = stripped.replace(u, "")
+        label_fields = ("Link", "Website", "Statute", "Annual Report", "Rules", "Research")
+        mostly_link = len(stripped.strip()) <= 12 or any(k in field for k in label_fields)
+        if mostly_link:
             parts = []
             for u in urls:
                 href = u if u.startswith("http") else f"https://{u}"
-                short = u.replace("https://", "").replace("http://", "")
-                short = short[:54] + "…" if len(short) > 55 else short
-                parts.append(f'<a href="{href}" target="_blank" rel="noopener">{short}</a>')
-            return "<br>".join(parts)
-    # Linkify emails in contact fields.
+                parts.append(f'<a href="{href}" target="_blank" rel="noopener">{_short_url(u)}</a>')
+            lead = stripped.strip()
+            prefix = f"{lead}<br>" if lead else ""
+            return prefix + "<br>".join(parts)
+        # URL embedded in longer prose: inline-link it in place.
+        for u in urls:
+            href = u if u.startswith("http") else f"https://{u}"
+            text = text.replace(u, f'<a href="{href}" target="_blank" rel="noopener">{_short_url(u)}</a>')
+
     text = EMAIL_RE.sub(r'<a href="mailto:\1">\1</a>', text)
     return text
 
@@ -149,6 +246,18 @@ def masthead():
 # ---------------------------------------------------------------------------
 # Program card + profile
 # ---------------------------------------------------------------------------
+# Short, clean label for the "funded at" chip; the raw field can be a sentence.
+def _fund_short(p) -> str:
+    fund = str(p.get("When is CSA funded for beneficiary?", "")).lower()
+    if "birth" in fund:
+        return "Birth"
+    if "kindergarten" in fund:
+        return "Kindergarten"
+    if "529" in fund or "opening" in fund:
+        return "529 opening"
+    return (p.get("When is CSA funded for beneficiary?") or "").split(".")[0][:24]
+
+
 def program_chips(p) -> str:
     chips = []
     enroll = p.get("Opt-In or Opt-Out?")
@@ -158,16 +267,47 @@ def program_chips(p) -> str:
     if not is_empty(elig):
         chips.append(f'<span class="chip">{elig}</span>')
     chips.append(f'<span class="chip"><span class="k">Seed</span> {seed_label(p).replace(" seed","")}</span>')
-    fund = p.get("When is CSA funded for beneficiary?")
-    if not is_empty(fund):
-        chips.append(f'<span class="chip"><span class="k">Funded at</span> {fund}</span>')
-    ly = p.get("Launch Year")
-    if not is_empty(ly):
+    fs = _fund_short(p)
+    if fs:
+        chips.append(f'<span class="chip"><span class="k">Funded at</span> {fs}</span>')
+    ly = launch_display(p)
+    if ly:
         chips.append(f'<span class="chip"><span class="k">Since</span> {ly}</span>')
     plan = p.get("529 Plan Linked To")
     if not is_empty(plan):
         chips.append(f'<span class="chip"><span class="k">529</span> {plan}</span>')
+    if has_research(p):
+        chips.append('<span class="chip research">Research available</span>')
     return "".join(chips)
+
+
+# Quick-access resource links surfaced directly on the card.
+LINK_CHIPS = [
+    ("Link to Program Website", "Website"),
+    ("Annual Report Link", "Annual report"),
+    ("Statutory Code / Link to Statute", "Statute"),
+    ("Link to Program Rules", "Program rules"),
+]
+
+
+def program_links(p) -> str:
+    chips = []
+    for field, label in LINK_CHIPS:
+        url = first_url(p.get(field))
+        if url:
+            chips.append(
+                f'<a class="linkchip" href="{url}" target="_blank" rel="noopener">'
+                f'{label} ↗</a>'
+            )
+    # Research link, when the study is published online.
+    rurl = first_url(p.get("Research Conducted"))
+    if rurl:
+        chips.append(
+            f'<a class="linkchip" href="{rurl}" target="_blank" rel="noopener">Research ↗</a>'
+        )
+    if not chips:
+        return ""
+    return '<div class="linkrow">' + "".join(chips) + "</div>"
 
 
 def render_card(p, idx):
@@ -179,6 +319,7 @@ def render_card(p, idx):
           <div class="facts">{program_chips(p)}</div>
           <div class="ribbon-title">Program lifecycle</div>
           {ribbon_html(p)}
+          {program_links(p)}
         </div>
         """),
         unsafe_allow_html=True,
@@ -330,13 +471,15 @@ def view_landscape():
     n_optout = sum(1 for p in PROGRAMS if str(p.get("Opt-In or Opt-Out?", "")).strip() == "Opt-Out")
     n_optin = sum(1 for p in PROGRAMS if str(p.get("Opt-In or Opt-Out?", "")).strip() == "Opt-In")
     n_universal = sum(1 for p in PROGRAMS if str(p.get("Eligibility", "")).strip() == "Universal")
+    n_research = sum(1 for p in PROGRAMS if has_research(p))
 
-    cols = st.columns(4)
+    cols = st.columns(5)
     tiles = [
         (n_programs, "Programs"),
         (n_states, "States"),
         (f"{n_optout} / {n_optin}", "Opt-out / Opt-in"),
-        (n_universal, "Universal programs"),
+        (n_universal, "Universal"),
+        (n_research, "With research"),
     ]
     for col, (n, l) in zip(cols, tiles):
         col.markdown(f'<div class="tile"><div class="n">{n}</div><div class="l">{l}</div></div>',
@@ -365,31 +508,49 @@ def view_landscape():
     )
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-    # How programs fund the account.
-    st.markdown('<div class="cat-head">How the account is first funded<span class="rule"></span></div>',
-                unsafe_allow_html=True)
+    def _hbar(counts: dict, title: str):
+        st.markdown(f'<div class="cat-head">{title}<span class="rule"></span></div>',
+                    unsafe_allow_html=True)
+        dfc = pd.DataFrame(sorted(counts.items(), key=lambda x: -x[1]),
+                           columns=["k", "Programs"])
+        bar = go.Figure(go.Bar(
+            x=dfc["Programs"], y=dfc["k"], orientation="h",
+            marker_color=theme.GREEN, text=dfc["Programs"], textposition="outside",
+        ))
+        bar.update_layout(
+            height=max(160, 54 * len(dfc)),
+            margin=dict(l=0, r=20, t=6, b=6),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(showgrid=False, zeroline=False, visible=False),
+            yaxis=dict(autorange="reversed"),
+            font=dict(family="Inter", color=theme.INK, size=13),
+        )
+        st.plotly_chart(bar, use_container_width=True, config={"displayModeBar": False})
+
+    # How programs first fund the account (normalized to the trigger event).
     fund_counts = {}
     for p in PROGRAMS:
-        key = str(p.get("When is CSA funded for beneficiary?", "Other")).strip() or "Other"
+        key = _fund_short(p) or "Other"
         fund_counts[key] = fund_counts.get(key, 0) + 1
-    fund_df = pd.DataFrame(
-        sorted(fund_counts.items(), key=lambda x: -x[1]),
-        columns=["Funding trigger", "Programs"],
-    )
-    bar = go.Figure(go.Bar(
-        x=fund_df["Programs"], y=fund_df["Funding trigger"],
-        orientation="h", marker_color=theme.GREEN,
-        text=fund_df["Programs"], textposition="outside",
-    ))
-    bar.update_layout(
-        height=max(180, 60 * len(fund_df)),
-        margin=dict(l=0, r=20, t=6, b=6),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(showgrid=False, zeroline=False, visible=False),
-        yaxis=dict(autorange="reversed"),
-        font=dict(family="Inter", color=theme.INK, size=13),
-    )
-    st.plotly_chart(bar, use_container_width=True, config={"displayModeBar": False})
+    _hbar(fund_counts, "How the account is first funded")
+
+    # How funds reach the beneficiary (new clean field this year).
+    dist_counts = {}
+    for p in PROGRAMS:
+        raw = str(p.get("Distribution Method", "")).strip().lower()
+        if not raw or raw in {"n/a", "na"}:
+            key = "Not specified"
+        elif "through 529" in raw or "withdrawal through" in raw:
+            key = "Withdrawal through 529"
+        elif "request" in raw or "outcome tracker" in raw:
+            # Beneficiary-initiated (may also mail a check once requested).
+            key = "Beneficiary request"
+        elif "check" in raw:
+            key = "Check to institution"
+        else:
+            key = "Other"
+        dist_counts[key] = dist_counts.get(key, 0) + 1
+    _hbar(dist_counts, "How funds reach the beneficiary")
 
 
 def view_about():
@@ -408,13 +569,19 @@ support future higher education. Programs differ in who is eligible, when the
 account is funded, how families engage with it, and how funds are eventually used.
 
 **The data.** Each program's information is submitted by the program and
-consolidated by The 529 Network. The program design reflected here is current as
+compiled by AKF Consulting Group for The 529 Network, with funding from the
+Charles Stewart Mott Foundation. The program design reflected here is current as
 of **{DATA_AS_OF}**. Account and asset figures carry their own "as of" dates,
 shown within each program profile.
 
+**Research and evaluation.** Where a program has published research or an
+evaluation of its work, it is linked from that program's card and profile, so
+the evidence base for each program sits alongside its design.
+
 **How it stays current.** The directory reads directly from a single source
-workbook. When programs submit updates, the workbook is refreshed and the
-directory reflects the new information.
+workbook and takes its "as of" date from that file. When programs submit
+updates, the workbook is refreshed and the directory reflects the new
+information with no other changes needed.
 
 **A note on neutrality.** Programs are listed alphabetically by state and are
 never scored or ranked. Comparisons show programs side by side so readers can

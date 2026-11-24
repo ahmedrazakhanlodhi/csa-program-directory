@@ -27,23 +27,45 @@ RIBBON_MAX_AGE = 30
 
 HS_GRAD_AGE = 18  # standard age at high school graduation, used for relative phrasing
 
+# Spelled-out numbers the firm's free text uses in place of digits
+# (e.g. "By age one"). Kept small on purpose: ages in this data are low.
+_WORD_NUM = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+}
+
 
 def _explicit_age(text) -> int | None:
-    """Pull an explicit 'Age N' value from a field."""
+    """
+    Pull an explicit age from a field.
+
+    Handles digits ("Age 26"), the "age of N" phrasing the clean 2026 data
+    uses ("reaches the age of 18"), and small spelled-out numbers
+    ("By age one"). The optional "of" keeps "age of 18" from being missed.
+    """
     if text is None:
         return None
-    m = re.search(r"age\s*(\d{1,2})", str(text), flags=re.IGNORECASE)
-    return int(m.group(1)) if m else None
+    s = str(text).lower()
+    m = re.search(r"age\s*(?:of\s*)?(\d{1,2})", s)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"age\s*(?:of\s*)?([a-z]+)", s)
+    if m and m.group(1) in _WORD_NUM:
+        return _WORD_NUM[m.group(1)]
+    return None
 
 
 def _resolve_age(text) -> int | None:
     """
     Resolve a distribution or forfeiture age from free text.
 
-    Handles explicit ages ("Age 26"), relative phrasing
-    ("6 years after high school graduation" -> 18 + 6), and the
-    "after high school" shorthand. Returns None when no age gate applies
-    (for example, "at account owner's discretion").
+    Handles explicit ages ("Age 26", "age of 18"), relative phrasing
+    ("6 years after high school graduation" -> 18 + 6), and the several
+    "high school" shorthands the clean data uses ("completes high school",
+    "after high school", "upon high school graduation"). Returns None when no
+    age gate applies (for example, "at account owner's discretion").
     """
     if text is None:
         return None
@@ -57,7 +79,13 @@ def _resolve_age(text) -> int | None:
     if m:
         return HS_GRAD_AGE + int(m.group(1))
 
-    if "after high school" in s or "high school graduation" in s:
+    if (
+        "after high school" in s
+        or "high school graduation" in s
+        or "completes high school" in s
+        or "finishes high school" in s
+        or "completing high school" in s
+    ):
         return HS_GRAD_AGE
 
     return None
@@ -75,12 +103,10 @@ def extract_lifecycle(program: dict) -> dict:
         fund_age, fund_label = 0, "Seeded at birth"
     elif "kindergarten" in funded_when_l:
         fund_age, fund_label = 5, "Seeded at kindergarten"
-    elif "529" in funded_when_l:
+    elif "529" in funded_when_l or "opening" in funded_when_l:
         # Event-based: anchor at the opt-in deadline if one is given.
-        opt_age = _explicit_age(opt_timing)
-        if opt_age is None and "age 1" in str(opt_timing).lower():
-            opt_age = 1
-        fund_age = opt_age
+        # _explicit_age now resolves both "age 1" and "age one".
+        fund_age = _explicit_age(opt_timing)
         fund_label = "Seeded when 529 is opened"
     else:
         fund_age, fund_label = None, str(funded_when) or "Funding varies"

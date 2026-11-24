@@ -77,7 +77,19 @@ h2 {{ font-weight: 600; }}
   border-radius: 999px; padding: 4px 11px;
 }}
 .chip.solid {{ background: var(--accent); border-color: var(--accent); color: var(--green-dark); font-weight: 600; }}
+.chip.research {{ background: #fff; border-color: var(--green); color: var(--green-dark); font-weight: 600; }}
+.chip.research::before {{ content: "◆"; font-size: 9px; margin-right: 3px; color: var(--green); }}
 .chip .k {{ color: var(--gray); }}
+
+/* Quick-access resource links on each card */
+.linkrow {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px;
+  padding-top: 12px; border-top: 1px solid var(--line); }}
+.linkchip {{
+  font-size: 12px; font-weight: 600; color: var(--green-dark);
+  background: var(--paper); border: 1px solid var(--line);
+  border-radius: 7px; padding: 4px 10px; text-decoration: none;
+}}
+.linkchip:hover {{ background: var(--accent); border-color: var(--green); }}
 
 .ribbon-title {{
   font-size: 11px; font-weight: 600; letter-spacing: 0.08em;

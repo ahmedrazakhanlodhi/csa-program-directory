@@ -60,8 +60,15 @@ streamlit run app.py
 ## Update the data
 
 1. Replace `data/CSA_Database.xlsx` with the firm's latest delivery.
-2. Update `DATA_AS_OF` at the top of `app.py` to the new data date.
-3. Reboot the app. The cache clears on reboot and the new data loads.
+2. Reboot the app. The cache clears on reboot and the new data loads.
+
+That is the whole process. The app reads the "as of" date, the field list,
+the six categories, and every program from the workbook itself, so a new
+annual file with added columns needs no code change. The loader auto-detects
+the header row and category band, and new fields appear in each program's
+profile automatically. (The 2026 file added ~11 fields — annual report links,
+legislation year, distribution detail, investment option, and research links —
+with no edits to the app.)
 
 ## Notes for collaborators
 
